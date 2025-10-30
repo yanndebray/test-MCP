@@ -1,0 +1,48 @@
+name: MATLAB Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  matlab-tests:
+    name: Run MATLAB Tests
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Check out repository
+      uses: actions/checkout@v3
+
+    - name: Set up MATLAB
+      uses: matlab-actions/setup-matlab@v1
+
+    - name: Run tests and generate coverage report
+      uses: matlab-actions/run-tests@v1
+      with:
+        source-folder: matlab-testing
+        select-by-folder: matlab-testing
+        test-results-junit: test-results/results.xml
+        code-coverage-cobertura: coverage/coverage.xml
+
+    - name: Upload test results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-results
+        path: test-results
+      
+    - name: Upload coverage results
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: coverage-results
+        path: coverage
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: coverage/coverage.xml
+        flags: matlab-tests
