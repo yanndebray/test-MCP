@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Chat JSON Viewer — VSCode-style</title>
+
+  <!-- Marked (markdown) and Highlight.js (code highlighting) from CDN -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+
+  <style>
+    /* Basic page layout */
+    :root{
+      --bg: #f6f8fa;
+      --panel: #ffffff;
+      --muted: #6b7280;
+      --accent: #0f62fe;
+      --msg-user: #e6f4ff;
+      --msg-assistant: #f3f4f6;
+      --radius: 10px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+      color-scheme: light;
+    }
+
+    html,body{height:100%;margin:0;background:var(--bg);}
+    .wrap{max-width:1100px;margin:24px auto;padding:18px;}
+
+    .header{display:flex;align-items:center;gap:12px;margin-bottom:12px}
+    .title{font-size:20px;font-weight:600}
+    .subtitle{color:var(--muted);font-size:13px}
+
+    /* Chat viewport */
+    .chat-panel{background:var(--panel);border-radius:12px;padding:18px;box-shadow:0 6px 18px rgba(15,23,42,0.06);}
+    .messages{display:flex;flex-direction:column;gap:14px;max-height:72vh;overflow:auto;padding:8px}
+
+    /* Message row styles */
+    .msg-row{display:flex;gap:10px;align-items:flex-start}
+    .msg-row.user{flex-direction:row-reverse}
+    .avatar{width:38px;height:38px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:700;color:#fff}
+    .avatar.user{background:linear-gradient(135deg,#0f62fe,#6f5ce8)}
+    .avatar.assistant{background:linear-gradient(135deg,#ff8a00,#ff5c7c)}
+    .bubble{max-width:78%;padding:12px;border-radius:10px;background:var(--msg-assistant);box-shadow:0 1px 0 rgba(15,23,42,0.03)}
+    .msg-row.user .bubble{background:var(--msg-user)}
+
+    .meta{display:flex;gap:8px;align-items:center;margin-bottom:6px}
+    .role{font-weight:600;font-size:13px}
+    .time{font-size:12px;color:var(--muted)}
+
+    /* Markdown content inside bubble */
+    .bubble :where(h1,h2,h3,h4){margin:6px 0}
+    .bubble p{margin:6px 0;font-size:14px;color:#111827}
+    .bubble pre{background:#111827;color:#f8fafc;padding:12px;border-radius:8px;overflow:auto}
+    .bubble code{background:#eef2ff;padding:2px 6px;border-radius:6px;font-family:monospace}
+
+    /* Code block container uses highlight.js style override for contrast */
+    pre code.hljs{background:transparent;padding:0;color:inherit}
+
+    /* Footer / small controls */
+    .controls{display:flex;gap:8px;margin-top:10px}
+    .btn{border:1px solid #e6e9ef;padding:6px 10px;border-radius:8px;background:#fff;cursor:pointer;font-size:13px}
+
+    /* Empty state */
+    .empty{padding:36px;text-align:center;color:var(--muted)}
+
+    /* Responsive */
+    @media (max-width:640px){.wrap{padding:12px;margin:8px} .bubble{max-width:86%}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <div class="title">Chat JSON Viewer</div>
+      <div class="subtitle">Renders messages from <code>chat.json</code> in a VS Code chat-like layout</div>
+    </div>
+
+    <div class="chat-panel">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;gap:12px">
+        <div style="display:flex;align-items:center;gap:8px;flex:1">
+          <label for="chatSelect" style="font-size:14px;color:var(--muted)">Chat:</label>
+          <select id="chatSelect" class="btn" style="min-width:200px;padding:6px 10px">
+            <option value="chat_weather_app.json">chat_weather_app.json</option>
+          </select>
+        </div>
+        <div class="controls">
+          <button id="reloadBtn" class="btn">Reload</button>
+          <button id="downloadBtn" class="btn">Download JSON</button>
+        </div>
+      </div>
+
+      <div id="messages" class="messages" aria-live="polite"></div>
+
+      <div id="empty" class="empty" style="display:none">No messages found in <code>chat.json</code>.</div>
+    </div>
+
+    <div style="margin-top:12px;color:var(--muted);font-size:13px">
+      Tip: open this file via a local web server (e.g. <code>python -m http.server</code>) so the browser can fetch <code>chat.json</code>.
+    </div>
+  </div>
+
+  <script>
+    // Extract an ordered sequence of user + assistant messages from common chat.json shapes.
+    // Handles the VS Code chat export shape which uses `requests` with a `message` (user)
+    // and a `response` array (assistant items). Falls back to previous heuristics.
+    function extractMessages(data) {
+      if (!data) return [];
+
+      // If it already is an array of messages, return it.
+      if (Array.isArray(data)) return data;
+
+      // If this looks like the VSCode chat export with requests[], build a sequence
+      if (Array.isArray(data.requests)) {
+        const seq = [];
+        for (const req of data.requests) {
+          // user/request message
+          try {
+            if (req.message) {
+              // message.text or message.parts
+              let t = '';
+              if (typeof req.message === 'string') t = req.message;
+              else if (req.message.text) t = req.message.text;
+              else if (Array.isArray(req.message.parts)) t = req.message.parts.map(p => (typeof p === 'string' ? p : (p.text || p.value || ''))).join('\n\n');
+              if (t) seq.push({ role: 'user', text: t, time: req.time || req.timestamp || req.requestTime || '' });
+            }
+          } catch(e){ /* ignore */ }
+
+          // assistant responses (an array of response items)
+          if (Array.isArray(req.response)) {
+            for (const r of req.response) {
+              // Normalize various common fields into a single object for later processing
+              if (typeof r === 'string') {
+                seq.push({ role: 'assistant', text: r });
+                continue;
+              }
+              // Known places that contain human-readable content
+              if (r.value && typeof r.value === 'string') { seq.push({ role: 'assistant', text: r.value, time: r.time||r.timestamp||'' }); continue; }
+              if (r.invocationMessage && r.invocationMessage.value) { seq.push({ role: 'assistant', text: r.invocationMessage.value }); continue; }
+              if (r.pastTenseMessage && r.pastTenseMessage.value) { seq.push({ role: 'assistant', text: r.pastTenseMessage.value }); continue; }
+              if (r.invocationMessage && r.invocationMessage.uris) { seq.push({ role: 'assistant', text: r.invocationMessage.value || JSON.stringify(r.invocationMessage, null, 2), raw:r }); continue; }
+              // textEditGroup / toolInvocationSerialized may contain nested messages we want to summarize
+              if (r.kind === 'textEditGroup' && r.pastTenseMessage && r.pastTenseMessage.value) { seq.push({ role:'assistant', text: r.pastTenseMessage.value }); continue; }
+              if (r.toolInvocationSerialized && r.toolInvocationSerialized.invocationMessage && r.toolInvocationSerialized.invocationMessage.value) { seq.push({ role:'assistant', text: r.toolInvocationSerialized.invocationMessage.value }); continue; }
+
+              // As a last resort push the raw object: normalizeMessage will stringify/render it nicely.
+              seq.push(Object.assign({ role: 'assistant' }, r));
+            }
+          }
+        }
+        return seq;
+      }
+
+      // Common wrapper array names used in other exports
+      const candidates = [ 'messages','items','chat','conversations','history','rows' ];
+      for (const key of candidates) if (Array.isArray(data[key])) return data[key];
+
+      // Try to find the first array value anywhere in object
+      for (const k in data) if (Array.isArray(data[k])) return data[k];
+
+      // If object looks like a single message, return it in an array
+      const hasMessageFields = ['role','author','text','content','message','delta'].some(f=>f in data);
+      if (hasMessageFields) return [data];
+
+      return [];
+    }
+
+    // Convert a single raw message to normalized shape: {role, text, time, attachments}
+    function normalizeMessage(raw) {
+      const m = { role: 'assistant', text: '', time: raw && (raw.time || raw.timestamp || raw.date || raw.createdAt || raw.ts || ''), attachments: [] };
+
+      if (!raw) return m;
+
+      // Determine role/author
+      if (raw.role) m.role = raw.role;
+      else if (raw.author) m.role = raw.author.role || raw.author;
+      else if (raw.from) m.role = raw.from;
+      else if (raw.who) m.role = raw.who;
+
+      // If it's already a string
+      if (typeof raw === 'string') { m.text = raw; return m; }
+
+      // Some common direct payloads
+      if (raw.value && typeof raw.value === 'string') { m.text = raw.value; return m; }
+      if (raw.invocationMessage && typeof raw.invocationMessage.value === 'string') { m.text = raw.invocationMessage.value; return m; }
+      if (raw.pastTenseMessage && typeof raw.pastTenseMessage.value === 'string') { m.text = raw.pastTenseMessage.value; return m; }
+
+      // message object (user request shape)
+      if (raw.message) {
+        if (typeof raw.message === 'string') { m.text = raw.message; return m; }
+        if (raw.message.text) { m.text = raw.message.text; return m; }
+        if (Array.isArray(raw.message.parts)) { m.text = raw.message.parts.map(p => (typeof p === 'string' ? p : (p.text || p.value || ''))).join('\n\n'); return m; }
+      }
+
+      // Generic content handling (OpenAI-ish or other shapes)
+      if (raw.content) {
+        if (typeof raw.content === 'string') { m.text = raw.content; return m; }
+        if (Array.isArray(raw.content)) { m.text = raw.content.map(c => (typeof c === 'string' ? c : (c.text || c.value || c.content || JSON.stringify(c)))).join('\n\n'); return m; }
+        if (raw.content.parts && Array.isArray(raw.content.parts)) { m.text = raw.content.parts.join('\n\n'); return m; }
+        const possible = ['text','value','body','markdown'];
+        for (const k of possible) if (k in raw.content) { m.text = raw.content[k]; return m; }
+      }
+
+      // Other simple text fields
+      if (raw.text && typeof raw.text === 'string') { m.text = raw.text; return m; }
+      if (raw.body && typeof raw.body === 'string') { m.text = raw.body; return m; }
+
+      // parts/delta
+      if (raw.delta && typeof raw.delta === 'string') { m.text = raw.delta; return m; }
+      if (raw.parts && Array.isArray(raw.parts)) { m.text = raw.parts.map(p => (typeof p === 'string' ? p : (p.text || p.value || ''))).join('\n\n'); return m; }
+
+      // attachments/files
+      if (raw.attachments && Array.isArray(raw.attachments)) m.attachments = raw.attachments.map(a => (typeof a === 'string' ? {url:a} : a));
+      if (raw.files && Array.isArray(raw.files)) m.attachments = m.attachments.concat(raw.files.map(f => (typeof f === 'string' ? {url:f} : f)));
+
+      // Special handling for file creation and tool messages
+      if (raw.kind === 'prepareToolInvocation' && raw.toolName === 'copilot_createFile') {
+        m.isToolMessage = true;
+        m.toolType = 'prepareFile';
+        return m;
+      }
+      if (raw.kind === 'toolInvocationSerialized' && raw.toolId === 'copilot_createFile') {
+        m.isToolMessage = true;
+        m.toolType = 'fileCreated';
+        // Extract file path from uris if available
+        if (raw.invocationMessage?.uris) {
+          const uri = Object.keys(raw.invocationMessage.uris)[0];
+          if (uri) {
+            m.filePath = decodeURIComponent(uri.replace('file:///', ''));
+            m.text = `Created ${m.filePath.split('/').pop()}`;
+          }
+        }
+        return m;
+      }
+
+      // If still nothing, preserve the raw object so we can pretty-print it in debug mode
+      if (!m.text) {
+        m.isJson = true;
+        m.rawObject = raw;
+      }
+
+      return m;
+    }
+
+    function formatTime(t) {
+      if (!t) return '';
+      try {
+        const d = new Date(t);
+        if (!isNaN(d)) return d.toLocaleString();
+      } catch (e) {}
+      // If it's a numeric timestamp in seconds
+      if (/^\d+$/.test(String(t))) {
+        const n = Number(t);
+        if (String(n).length === 10) return new Date(n*1000).toLocaleString();
+        if (String(n).length === 13) return new Date(n).toLocaleString();
+      }
+      return String(t);
+    }
+
+    function createAvatar(role) {
+      const el = document.createElement('div');
+      el.className = 'avatar ' + (role && role.toLowerCase().includes('user') ? 'user' : 'assistant');
+      const name = String(role||'A');
+      // take initials
+      const initials = name.split(/\s+/).map(p=>p[0]).slice(0,2).join('').toUpperCase();
+      el.textContent = initials || (name[0] || 'A').toUpperCase();
+      return el;
+    }
+
+    // Escape HTML for safe code rendering
+    function escapeHtml(unsafe) {
+      return String(unsafe)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function renderMessage(container, msg, idx) {
+      const row = document.createElement('div');
+      row.className = 'msg-row ' + (String(msg.role||'').toLowerCase().includes('user') ? 'user' : 'assistant');
+
+      const avatar = createAvatar(msg.role);
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble';
+
+      const meta = document.createElement('div');
+      meta.className = 'meta';
+      const role = document.createElement('div'); role.className = 'role'; role.textContent = String(msg.role||'Assistant');
+      const time = document.createElement('div'); time.className = 'time'; time.textContent = formatTime(msg.time);
+      meta.appendChild(role); if (time.textContent) meta.appendChild(time);
+
+      bubble.appendChild(meta);
+
+      const content = document.createElement('div');
+      content.className = 'content';
+
+      // If the message is a JSON/object payload we preserved earlier, render it as a pretty JSON code block
+      if (msg.isJson && msg.rawObject) {
+        const jsonStr = JSON.stringify(msg.rawObject, null, 2);
+        content.innerHTML = '<pre><code class="hljs language-json">' + escapeHtml(jsonStr) + '</code></pre>';
+        // highlight
+        try { hljs.highlightElement(content.querySelector('pre code')); } catch(e){}
+      } else {
+        const rawText = (msg.text || '');
+        // Use marked to render markdown -> convert to HTML
+        // Use sanitized option? marked has options; for simplicity we allow basic HTML. Avoid using untrusted HTML in production.
+        const md = marked.parse(rawText || '');
+        content.innerHTML = md;
+      }
+
+      // Highlight code blocks
+      content.querySelectorAll('pre code').forEach((block) => {
+        try { hljs.highlightElement(block); } catch(e){}
+        // add copy button
+        const copyBtn = document.createElement('button');
+        copyBtn.textContent = 'Copy';
+        copyBtn.style.cssText = 'position:relative;margin-left:8px;font-size:12px;padding:4px 6px;border-radius:6px;';
+        copyBtn.addEventListener('click', async ()=>{
+          try { await navigator.clipboard.writeText(block.textContent); copyBtn.textContent='Copied'; setTimeout(()=>copyBtn.textContent='Copy',1200);}catch(e){alert('Copy failed')}
+        });
+        // place button above pre
+        const pre = block.closest('pre');
+        if (pre) pre.parentNode.insertBefore(copyBtn, pre);
+      });
+
+      bubble.appendChild(content);
+
+      // Attachments rendering (links/images)
+      if (Array.isArray(msg.attachments) && msg.attachments.length) {
+        const attWrap = document.createElement('div'); attWrap.style.marginTop='8px';
+        for (const a of msg.attachments) {
+          const url = a.url || a.src || a.path || a.link;
+          if (!url) continue;
+          if (/\.(png|jpg|jpeg|gif|svg)(\?.*)?$/i.test(url)) {
+            const img = document.createElement('img'); img.src = url; img.style.maxWidth='320px'; img.style.borderRadius='8px'; img.style.display='block'; img.style.marginTop='8px'; attWrap.appendChild(img);
+          } else {
+            const link = document.createElement('a'); link.href = url; link.textContent = url; link.target='_blank'; link.style.display='block'; link.style.marginTop='6px'; attWrap.appendChild(link);
+          }
+        }
+        bubble.appendChild(attWrap);
+      }
+
+      // assemble row: avatar + bubble
+      row.appendChild(avatar);
+      row.appendChild(bubble);
+      container.appendChild(row);
+    }
+
+    async function discoverChatFiles() {
+      const select = document.getElementById('chatSelect');
+      
+      // Known chat files in the chats/ folder
+      const knownFiles = ['chat_weather_app.json'];
+      
+      try {
+        // Try to fetch a list of chat files - since we're in the chats/ folder, look for .json files in current directory
+        const res = await fetch('./', {cache: 'no-store'});
+        if (res.ok) {
+          const html = await res.text();
+          // Parse directory listing for .json files
+          const parser = new DOMParser();
+          const doc = parser.parseFromString(html, 'text/html');
+          const links = Array.from(doc.querySelectorAll('a'));
+          const jsonFiles = links
+            .map(a => {
+              const href = a.getAttribute('href');
+              if (!href) return null;
+              // Decode URL-encoded paths and extract just the filename
+              const decoded = decodeURIComponent(href);
+              const filename = decoded.split('/').pop().split('\\').pop();
+              return filename;
+            })
+            .filter(name => name && name.endsWith('.json') && !name.includes('..') && name !== 'chat_view.html');
+          
+          if (jsonFiles.length > 0) {
+            select.innerHTML = '';
+            jsonFiles.forEach(file => {
+              const opt = document.createElement('option');
+              opt.value = file;
+              opt.textContent = file;
+              select.appendChild(opt);
+            });
+            return;
+          }
+        }
+      } catch (e) {
+        console.log('Directory listing not available, using known files:', e);
+      }
+      
+      // Fallback: use known files list
+      select.innerHTML = '';
+      knownFiles.forEach(file => {
+        const opt = document.createElement('option');
+        opt.value = file;
+        opt.textContent = file;
+        select.appendChild(opt);
+      });
+    }
+
+    async function loadAndRender() {
+      const messagesEl = document.getElementById('messages');
+      const emptyEl = document.getElementById('empty');
+      const select = document.getElementById('chatSelect');
+      const selectedFile = select.value;
+      messagesEl.innerHTML = '';
+
+      try {
+        const res = await fetch(selectedFile, {cache: 'no-store'});
+        if (!res.ok) throw new Error('Fetch failed: ' + res.statusText);
+        const data = await res.json();
+        const rawMessages = extractMessages(data);
+        if (!rawMessages || rawMessages.length === 0) { emptyEl.style.display='block'; return }
+        emptyEl.style.display='none';
+
+        const normalized = rawMessages.map(normalizeMessage);
+        normalized.forEach((m,i)=>renderMessage(messagesEl,m,i));
+
+        // scroll to bottom
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      } catch (err) {
+        console.error(err);
+        document.getElementById('empty').style.display='block';
+        document.getElementById('empty').textContent = 'Error loading chat.json: ' + err.message;
+      }
+    }
+
+    document.getElementById('chatSelect').addEventListener('change', ()=>loadAndRender());
+    document.getElementById('reloadBtn').addEventListener('click', ()=>loadAndRender());
+    document.getElementById('downloadBtn').addEventListener('click', async ()=>{
+      try {
+        const select = document.getElementById('chatSelect');
+        const selectedFile = select.value;
+        const r = await fetch(selectedFile); const txt = await r.text();
+        const blob = new Blob([txt], {type:'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = selectedFile.split('/').pop(); document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+      } catch(e){alert('Download failed: '+e.message)}
+    });
+
+    // initial discovery and render
+    discoverChatFiles().then(()=>loadAndRender());
+  </script>
+</body>
+</html>
