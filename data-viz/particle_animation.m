@@ -1,8 +1,12 @@
 % High-Performance Particle System Animation
 % Initialize parameters
 numParticles = 50;    % Number of particles
-numFrames = 1500;     % Number of animation frames
+numFrames = 100;     % Number of animation frames
 trailLength = 20;     % Length of trailing paths
+videoFilename = 'particle_animation.mp4';
+v = VideoWriter(videoFilename, 'MPEG-4');
+v.FrameRate = 30;
+open(v);
 
 % Initialize particle positions and trails
 positions = zeros(numParticles, 2, trailLength);
@@ -13,10 +17,8 @@ figure('Position', [100 100 800 600]);
 ax = axes;
 xlim(ax, [-10 10]);
 ylim(ax, [-10 10]);
-title('Particle System Animation');
-xlabel('X Position');
-ylabel('Y Position');
-grid on;
+axis off;
+axis off; % Remove axis display
 
 % Create scatter plot object for particles (efficiency: create once)
 h_particles = scatter(ax, positions(:,1,1), positions(:,2,1), 50, ...
@@ -55,4 +57,8 @@ for frame = 1:numFrames
     
     % Efficient display update with frame rate limit
     drawnow limitrate
+    
+    % Capture and write video frame
+    writeVideo(v, getframe(gcf));
 end
+close(v);
